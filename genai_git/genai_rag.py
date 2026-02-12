@@ -1,16 +1,25 @@
-
+# ============================================================
+# 1. Imports & Configuration
+# ============================================================
 from pypdf import PdfReader
 import numpy as np
 import requests
+import re
 from sentence_transformers import SentenceTransformer
 
-# ===============================
+
+PDF_PATH = r"d:\pdfmatforgenai\object_oriented_python_tutorial.pdf"
+EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"
+OLLAMA_URL = "http://localhost:11434/api/generate"
+OLLAMA_MODEL = "phi3:mini"
+
+
+# ============================================================
 # 2. Load & Read PDF
-# ===============================
-reader = PdfReader(r"d:\pdfmatforgenai\object_oriented_python_tutorial.pdf")
+# ============================================================
+reader = PdfReader(PDF_PATH)
 
 pages = []
-
 for i, page in enumerate(reader.pages):
     text = page.extract_text()
     if text:
@@ -19,30 +28,26 @@ for i, page in enumerate(reader.pages):
             "text": text
         })
 
+print(f"Loaded {len(pages)} pages from PDF")
 
 
-# ===============================
-# 3. Clean Text
-# ===============================
-def clean_text(text):
+# ============================================================
+# 3. Text Cleaning & Normalization
+# ============================================================
+def clean_text(text: str) -> str:
     lines = text.split("\n")
     clean_lines = []
 
     for line in lines:
         line = line.strip()
-
         if not line:
             continue
-
-        
         clean_lines.append(line)
 
     return "\n".join(clean_lines)
 
 
-import re
-
-def normalize_slide_text(text):
+def normalize_text(text: str) -> str:
     text = text.replace("•", ". ")
     text = text.replace("–", ". ")
     text = text.replace("-", ". ")
@@ -51,14 +56,14 @@ def normalize_slide_text(text):
     return text.strip()
 
 
-def split_sentences(text):
+def split_sentences(text: str):
     sentences = re.split(r'(?<=[.!?])\s+', text)
     return [s.strip() for s in sentences if s.strip()]
-               
-# # ===============================
-# # 4. Chunk Text
-# # ===============================
 
+
+# ============================================================
+# 4. Chunking Strategy (Sentence-based with overlap)
+# ============================================================
 def build_chunks(sentences, max_chars=600, overlap_sentences=1):
     chunks = []
     current = []
@@ -79,18 +84,10 @@ def build_chunks(sentences, max_chars=600, overlap_sentences=1):
 chunks = []
 
 for page in pages:
-    # only first 2 pages
-    # if page["page"] > 2:   
-    #     break 
     cleaned = clean_text(page["text"])
-    normalized = normalize_slide_text(cleaned)
+    normalized = normalize_text(cleaned)
     sentences = split_sentences(normalized)
     page_chunks = build_chunks(sentences)
-             #  TO SEE CHUNKS 
-    # print("\n--- PAGE", page["page"], "CHUNKS (first 2) ---\n")
-    # for c in page_chunks[:2]:
-    #     print(c)
-
 
     for i, chunk in enumerate(page_chunks):
         chunks.append({
@@ -99,21 +96,20 @@ for page in pages:
             "chunk_id": i
         })
 
-for i, chunk in enumerate(chunks):
-    if not chunk["text"].strip():
-        print("EMPTY CHUNK FOUND AT INDEX:", i, "PAGE:", chunk["page"])
-        pass
+print(f"Built {len(chunks)} chunks")
 
 
+# ============================================================
+# 5. Embedding Model
+# ============================================================
+embed_model = SentenceTransformer(EMBEDDING_MODEL_NAME)
 
-
-
-embed_model = SentenceTransformer("all-MiniLM-L6-v2")
-def embed_text(text: str):
+def embed_text(text: str) -> np.ndarray:
     return embed_model.encode(
         text,
         normalize_embeddings=True
     )
+
 
 embeddings = []
 valid_chunks = []
@@ -127,18 +123,19 @@ for chunk in chunks:
 
 chunks = valid_chunks
 
+print(f"Embedded {len(embeddings)} chunks")
 
 
-# ===============================
-# 7. Cosine Similarity
-# ===============================
-def cosine_similarity(a, b):
+# ============================================================
+# 6. Similarity Function (Cosine)
+# ============================================================
+def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
     return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
 
 
-# ===============================
-# 8. Retrieve Top Chunks
-# ===============================
+# ============================================================
+# 7. Retrieval (Top-K Semantic Search)
+# ============================================================
 def retrieve_top_chunks(question, chunks, embeddings, top_k=2):
     question_embedding = embed_text(question)
 
@@ -147,23 +144,19 @@ def retrieve_top_chunks(question, chunks, embeddings, top_k=2):
         score = cosine_similarity(question_embedding, emb)
         scores.append((i, score))
 
-    scores = sorted(scores, key=lambda x: x[1], reverse=True)
+    scores.sort(key=lambda x: x[1], reverse=True)
     top = scores[:top_k]
 
     return [(chunks[i], score) for i, score in top]
 
 
-
-# # ===============================
-# # 9. Build Prompt
-# # =============================== 
-
-
-def build_prompt(question, retrieved_chunks): # same as retrieved (prompt = build_prompt(question, retrieved))
+# ============================================================
+# 8. Prompt Construction (Strict Grounding)
+# ============================================================
+def build_prompt(question, retrieved_chunks):
     context = ""
     for chunk, _ in retrieved_chunks:
         context += f"[Page {chunk['page']}] {chunk['text']}\n\n"
-
 
     return f"""
 You are a helpful assistant.
@@ -176,14 +169,16 @@ Context:
 Question:
 {question}
 """
-# ===============================
-# 10. Ask Ollama LLM
-# ===============================
-def ask_llm(prompt):
+
+
+# ============================================================
+# 9. Local LLM Interface (Ollama)
+# ============================================================
+def ask_llm(prompt: str) -> str:
     response = requests.post(
-        "http://localhost:11434/api/generate",
+        OLLAMA_URL,
         json={
-            "model": "phi3:mini",
+            "model": OLLAMA_MODEL,
             "prompt": prompt,
             "stream": False
         }
@@ -200,15 +195,10 @@ def ask_llm(prompt):
     raise RuntimeError(f"Unexpected Ollama response format: {data}")
 
 
-
-
-# ===============================
-# 11. Run RAG
-# ===============================
+# ============================================================
+# 10. End-to-End RAG Execution
+# ============================================================
 question = "What is inheritance in OOP and why is it used?"
-
-
-
 
 retrieved = retrieve_top_chunks(
     question=question,
@@ -216,14 +206,15 @@ retrieved = retrieve_top_chunks(
     embeddings=embeddings,
     top_k=2
 )
-print("\n=== RETRIEVED CHUNKS ===")
 
+print("\n=== RETRIEVED CHUNKS ===")
 for chunk, score in retrieved:
     print(f"\n[SCORE: {score:.4f}] Page {chunk['page']}")
     print(chunk["text"])
 
 prompt = build_prompt(question, retrieved)
-answer = ask_llm(prompt)
 
+# Uncomment when LLM is available
+answer = ask_llm(prompt)
 print("\n=== ANSWER ===\n")
 print(answer)
